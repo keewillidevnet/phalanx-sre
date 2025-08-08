@@ -1,0 +1,10 @@
+pandas>=2.2
+numpy>=1.26
+rich>=13.7
+networkx>=3.2
+plotly>=5.22
+streamlit>=1.36
+pyshark>=0.6
+fastapi>=0.111
+uvicorn[standard]>=0.30
+scapy>=2.5.0

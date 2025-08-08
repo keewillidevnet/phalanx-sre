@@ -1,0 +1,13 @@
+{
+  "actions": {
+    "start_capture": {"min_trust": 0.4, "min_votes": 1},
+    "apply_mss_clamp": {"min_trust": 0.7, "min_votes": 2},
+    "traffic_shift": {"min_trust": 0.8, "min_votes": 3},
+    "rollback_deploy": {"min_trust": 0.6, "min_votes": 2}
+  },
+  "roles": {
+    "SREBot": 0.5,
+    "SecurityAgent": 0.8,
+    "OpsLeadAgent": 0.9
+  }
+}
