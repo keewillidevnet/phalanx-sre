@@ -28,8 +28,9 @@ NODE_SIZE_BASE = 16
 NODE_SIZE_FACTOR = 8
 ARROW_OPACITY = 0.85
 ARROW_HEAD = 7
-ARROW_STEM = 0.94           # where arrow head sits along the edge
-LABEL_OFFSET = 0.045        # perpendicular offset for latency labels
+ARROW_STEM = 0.985          # arrow head position along the edge (0..1)
+LABEL_OFFSET = 0.055        # perpendicular offset for latency labels
+PAD_COL = 8                 # pad target for edge hover labels ("Latency:" width)
 # ----------------------------------------------------------------
 
 # --------------------------- helpers ----------------------------
@@ -94,6 +95,12 @@ def _perp_offset(x0, y0, x1, y1, frac=0.5, offset=0.05) -> Tuple[float, float]:
     ny_ = dx / length
     return mx + nx_ * offset, my + ny_ * offset
 
+def _pad_label(label: str, width: int = PAD_COL) -> str:
+    """Pad a short label (e.g., 'Loss:') with NBSPs to align with 'Latency:'."""
+    # NB: Plotly hoverlabels collapse normal spaces; NBSPs (&nbsp;) persist.
+    pad = max(0, width - len(label))
+    return label + ("&nbsp;" * pad)
+
 # --------------------------- rendering --------------------------
 
 def _figure_for_topology(topology: dict) -> go.Figure:
@@ -119,47 +126,64 @@ def _figure_for_topology(topology: dict) -> go.Figure:
     pos = _layout_positions(g)
 
     # ---- Nodes: size by degree, color by status, label by "label" or id,
-    # and include a summary of adjacent edge KPIs in the hover text.
+    # with compact, formatted KPI summaries in the hover text.
     node_x, node_y, node_text, node_sizes, node_colors, node_labels = [], [], [], [], [], []
     degrees = dict(g.degree())
 
-    def edge_kpi_summary(nid: str) -> str:
-        inbound  = [data for _, _, data in g.in_edges(nid, data=True)]
-        outbound = [data for _, _, data in g.out_edges(nid, data=True)]
-        def summarize(edges):
-            if not edges:
-                return None
-            lat    = [e.get("latency_ms") or e.get("kpi_latency_ms") for e in edges if (e.get("latency_ms") or e.get("kpi_latency_ms")) is not None]
-            loss   = [e.get("loss_pct")   for e in edges if e.get("loss_pct")   is not None]
-            jitter = [e.get("jitter_ms")  for e in edges if e.get("jitter_ms")  is not None]
-            parts = []
-            if lat:    parts.append(f"lat max={max(lat):g} ms")
-            if loss:   parts.append(f"loss max={max(loss):g}%")
-            if jitter: parts.append(f"jitter max={max(jitter):g} ms")
-            return ", ".join(parts) if parts else None
-
-        inbound_s  = summarize(inbound)
-        outbound_s = summarize(outbound)
-        lines = []
-        if inbound_s:  lines.append(f"inbound: {inbound_s}")
-        if outbound_s: lines.append(f"outbound: {outbound_s}")
-        return "<br>".join(lines)
+    def summarize_edges(edges):
+        if not edges:
+            return {}
+        lat    = [e.get("latency_ms") or e.get("kpi_latency_ms") for e in edges if (e.get("latency_ms") or e.get("kpi_latency_ms")) is not None]
+        loss   = [e.get("loss_pct")   for e in edges if e.get("loss_pct")   is not None]
+        jitter = [e.get("jitter_ms")  for e in edges if e.get("jitter_ms")  is not None]
+        out = {}
+        if lat:    out["latency"] = f"{max(lat):g} ms"
+        if loss:   out["loss"]    = f"{max(loss):g}%"
+        if jitter: out["jitter"]  = f"{max(jitter):g} ms"
+        return out
 
     for n, data in g.nodes(data=True):
         x, y = pos[n]
         node_x.append(x); node_y.append(y)
-        status = data.get("status", "healthy")
+        status = (data.get("status") or "healthy").capitalize()
         label  = data.get("label", n)
-        role   = data.get("role", "node")
+        role   = (data.get("role") or "node").capitalize()
 
-        summary = edge_kpi_summary(n)
-        hover = f"{label}<br>role={role} · status={status}"
-        if summary:
-            hover += f"<br><br><b>links</b><br>{summary}"
+        inbound_kpis  = summarize_edges([d for _, _, d in g.in_edges(n, data=True)])
+        outbound_kpis = summarize_edges([d for _, _, d in g.out_edges(n, data=True)])
+
+        # Build compact, left-aligned hover text
+        lines = [
+            f"<b>{label}</b>",
+            f"Role: {role} | Status: {status}",
+            "",
+            "<b>Links</b>"
+        ]
+
+        def add_section(title: str, kpis: dict):
+            if not kpis:
+                return
+            keys = list(kpis.keys())
+            if len(keys) == 1:
+                # Single KPI: inline, flush-left
+                key = keys[0]
+                pretty = {"latency": "Latency Max", "loss": "Loss Max", "jitter": "Jitter Max"}[key]
+                lines.append(f"{title}: {pretty} = {kpis[key]}")
+            else:
+                # Multi-KPI: one per line with a small indent
+                lines.append(f"{title}:")
+                if "latency" in kpis: lines.append(f"&nbsp;&nbsp;Latency Max = {kpis['latency']}")
+                if "loss"    in kpis: lines.append(f"&nbsp;&nbsp;Loss Max     = {kpis['loss']}")
+                if "jitter"  in kpis: lines.append(f"&nbsp;&nbsp;Jitter Max   = {kpis['jitter']}")
+
+        add_section("Inbound", inbound_kpis)
+        add_section("Outbound", outbound_kpis)
+
+        hover = "<br>".join(lines)
 
         node_labels.append(label)
         node_text.append(hover)
-        node_colors.append(_node_color(status))
+        node_colors.append(_node_color(data.get("status")))
         node_sizes.append(_node_size_for_degree(degrees.get(n, 1)))
 
     node_trace = go.Scatter(
@@ -201,14 +225,18 @@ def _figure_for_topology(topology: dict) -> go.Figure:
         color = _latency_color(bucket)
         width = EDGE_WIDTHS["good"] if bucket == "good" else EDGE_WIDTHS["warn"] if bucket == "warn" else EDGE_WIDTHS["bad"]
 
-        # offset label position so it doesn't overlap the line
+        # offset label so it doesn't overlap the line
         lx, ly = _perp_offset(x0, y0, x1, y1, frac=0.5, offset=LABEL_OFFSET)
         label_x.append(lx); label_y.append(ly)
-        # hover template with extra KPIs if present
-        txt = f"latency: {lat_ms if lat_ms is not None else '?'} ms"
-        if loss is not None:   txt += f"<br>loss: {loss}%"
-        if jitter is not None: txt += f"<br>jitter: {jitter} ms"
-        hover_text.append(txt)
+
+        # Edge hover text (aligned labels, monospace)
+        lines = []
+        if lat_ms is not None: lines.append(f"{_pad_label('Latency:')} {lat_ms:g} ms")
+        if loss   is not None: lines.append(f"{_pad_label('Loss:')} {loss:g}%")
+        if jitter is not None: lines.append(f"{_pad_label('Jitter:')} {jitter:g} ms")
+        if not lines:
+            lines.append(f"{_pad_label('Latency:')} ?")
+        hover_text.append("<br>".join(lines))
 
         # draw latency text as annotation (no arrow)
         annotations.append(dict(
@@ -217,11 +245,12 @@ def _figure_for_topology(topology: dict) -> go.Figure:
             showarrow=False, font=dict(size=12, color="#cbd5e1")
         ))
 
-        # draw the arrow colored by bucket
+        # draw the arrow colored by bucket — with no standoff gap
         annotations.append(dict(
             x=ax, y=ay, ax=x0, ay=y0, xref="x", yref="y", axref="x", ayref="y",
             arrowhead=3, arrowsize=ARROW_HEAD/10, arrowwidth=width,
-            opacity=ARROW_OPACITY, arrowcolor=color, standoff=2, startstandoff=2,
+            opacity=ARROW_OPACITY, arrowcolor=color,
+            standoff=0, startstandoff=0,
             showarrow=True
         ))
 
@@ -241,6 +270,7 @@ def _figure_for_topology(topology: dict) -> go.Figure:
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
         annotations=annotations,
+        hoverlabel=dict(font_size=12, font_family="monospace", align="left")  # slim, aligned, left
     )
     return fig
 

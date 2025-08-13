@@ -5,6 +5,7 @@
 # - Nodes include labels, roles, and status (one degraded)
 # - Edges include latency_ms so the battlemap colors & labels links
 
+# examples/demo_topology.yaml
 nodes:
   - id: ClientA
     label: "Client A — Web"
@@ -36,19 +37,27 @@ edges:
   - source: ClientA
     target: EdgeGW1
     latency_ms: 8
+
   - source: EdgeGW1
     target: CoreGW2
     latency_ms: 22
+    loss_pct: 0.1        # <-- optional KPI: packet loss %
+
   - source: CoreGW2
     target: ServiceAPI
     latency_ms: 48
+    jitter_ms: 2         # <-- optional KPI: jitter in ms
 
   # DB path (elevated but not critical)
   - source: ServiceAPI
     target: Database
     latency_ms: 95
+    loss_pct: 0.8        # <-- will show in hover
+    jitter_ms: 4
 
   # External call (intentionally high to show a red link)
   - source: ServiceAPI
     target: PayGateway
     latency_ms: 130
+    loss_pct: 1.2
+    jitter_ms: 8
