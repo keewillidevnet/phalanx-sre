@@ -1,6 +1,5 @@
 ---
-# examples/demo_topology.yaml
-# Tiny demo topology for Phalanx SRE Battlemap preview
+
 nodes:
   - id: NodeA
     label: "Node A — Web Frontend"
@@ -19,7 +18,7 @@ nodes:
     role: external
     status: healthy
 
-links:
+edges:
   - source: NodeA
     target: NodeB
     latency_ms: 12
