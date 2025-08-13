@@ -1,7 +1,7 @@
 # battlemap/topology_map.py
 from pathlib import Path
-import json
 import math
+from typing import Dict, Any, List, Tuple
 
 import plotly.graph_objects as go
 
@@ -18,66 +18,57 @@ except Exception:
 
 DEMO_TOPO = Path("examples/demo_topology.yaml")
 
+# ---- Tunables ---------------------------------------------------
+# Latency thresholds (ms) for edge color & width scaling
+THRESHOLDS = {
+    "good": 20,    # <= green
+    "warn": 80,    # <= yellow
+    # > warn => red
+}
+EDGE_WIDTHS = {"good": 2.5, "warn": 3.5, "bad": 5.0}
+NODE_SIZE_BASE = 16      # minimum size
+NODE_SIZE_FACTOR = 8     # added per log-degree
+ARROW_OPACITY = 0.75
+ARROW_HEAD = 7           # arrow head size
+ARROW_STEM = 0.95        # arrow head location (as fraction along the edge)
+# ----------------------------------------------------------------
 
-# --------------------------- helpers ---------------------------
+# --------------------------- helpers ----------------------------
 
-def _coalesce_edges(topology: dict):
-    """Support either 'edges' or 'links' keys in YAML."""
+def _coalesce_edges(topology: dict) -> List[dict]:
+    """Support 'edges' or 'links' keys in YAML."""
     if "edges" in topology and isinstance(topology["edges"], list):
         return topology["edges"]
     if "links" in topology and isinstance(topology["links"], list):
         return topology["links"]
     return []
 
-def _kpi(edge, key, default=None):
-    # normalize common KPI keys across different samples
-    return (
-        edge.get(key)
-        or edge.get(f"kpi_{key}")
-        or edge.get(f"{key}_ms")
-        or edge.get(f"latency_{key}")
-        or default
-    )
+def _bucket_latency(ms: float | None) -> str:
+    if ms is None:
+        return "warn"   # neutral
+    if ms <= THRESHOLDS["good"]:
+        return "good"
+    if ms <= THRESHOLDS["warn"]:
+        return "warn"
+    return "bad"
 
-def _latency_to_color(lat_ms: float | None) -> str:
-    """
-    Map latency to a color on green→yellow→red.
-    <20ms green, ~50ms yellow, >=120ms red.
-    """
-    if lat_ms is None:
-        return "#7a7f8c"  # neutral
-    # clamp 0..120
-    x = max(0.0, min(120.0, float(lat_ms))) / 120.0
-    # simple GYR ramp
-    # green (0,170,0) -> yellow (255,200,0) -> red (220,0,0)
-    if x < 0.5:
-        t = x / 0.5
-        r = int(0 + t * (255 - 0))
-        g = int(170 + t * (200 - 170))
-        b = 0
-    else:
-        t = (x - 0.5) / 0.5
-        r = int(255 + t * (220 - 255))
-        g = int(200 + t * (0 - 200))
-        b = 0
-    return f"rgb({r},{g},{b})"
+def _latency_color(bucket: str) -> str:
+    return {"good": "#22c55e", "warn": "#f9a825", "bad": "#ef4444"}.get(bucket, "#9ca3af")
 
 def _node_color(status: str | None) -> str:
-    if (status or "").lower() in ("degraded", "warning"):
-        return "#ffb020"  # amber
-    if (status or "").lower() in ("down", "critical", "error", "failed"):
-        return "#e11d48"  # red
+    s = (status or "").lower()
+    if s in ("degraded", "warning"):
+        return "#f59e0b"  # amber
+    if s in ("down", "critical", "error", "failed"):
+        return "#ef4444"  # red
     return "#22c55e"      # green
 
-def _layout_positions(g):
-    """Stable-ish layout. Use provided xy if present; else spring_layout."""
+def _layout_positions(g) -> Dict[Any, Tuple[float, float]]:
+    """Use explicit node x/y if present, else stable spring layout."""
     if nx is None:
-        # fallback fixed pseudo-positions if networkx missing
         nodes = list(g)
-        n = len(nodes)
-        return {n_id: (math.cos(i*2*math.pi/n), math.sin(i*2*math.pi/n))
-                for i, n_id in enumerate(nodes)}
-    # prefer explicit coordinates from node data
+        n = max(1, len(nodes))
+        return {nid: (math.cos(i*2*math.pi/n), math.sin(i*2*math.pi/n)) for i, nid in enumerate(nodes)}
     pos = {}
     missing = []
     for n, data in g.nodes(data=True):
@@ -86,93 +77,120 @@ def _layout_positions(g):
         else:
             missing.append(n)
     if missing:
-        spring = nx.spring_layout(g, seed=42, k=1.1)
+        spring = nx.spring_layout(g, seed=42, k=1.0)
         for n in missing:
             pos[n] = spring[n]
     return pos
 
+def _node_size_for_degree(deg: int) -> float:
+    # gentle scaling by log-degree so hubs pop but small graphs don’t blow up
+    return NODE_SIZE_BASE + NODE_SIZE_FACTOR * math.log2(max(1, deg) + 1)
 
-# --------------------------- rendering ---------------------------
+# --------------------------- rendering --------------------------
 
-def _figure_for_topology(topology: dict):
+def _figure_for_topology(topology: dict) -> go.Figure:
     if nx is None:
         raise RuntimeError("networkx is required for battlemap rendering")
+
     nodes = topology.get("nodes", [])
     edges = _coalesce_edges(topology)
 
-    # Build graph
+    # Build directed graph
     g = nx.DiGraph()
     for n in nodes:
         nid = n.get("id") or n.get("name")
         if not nid:
             continue
         g.add_node(nid, **{k: v for k, v in n.items() if k not in ("id", "name")})
+
     for e in edges:
         src = e.get("source"); dst = e.get("target")
-        if not (src and dst) or src not in g or dst not in g:
+        if not (src and dst):
+            continue
+        if src not in g or dst not in g:
             continue
         g.add_edge(src, dst, **e)
 
     pos = _layout_positions(g)
 
-    # Edge traces
-    edge_x, edge_y, edge_colors = [], [], []
-    edge_text_x, edge_text_y, edge_labels = [], [], []
-    for u, v, data in g.edges(data=True):
-        x0, y0 = pos[u]; x1, y1 = pos[v]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
-        lat = _kpi(data, "latency_ms")
-        edge_colors.append(_latency_to_color(lat))
-        # label position (midpoint)
-        mx = (x0 + x1) / 2.0; my = (y0 + y1) / 2.0
-        edge_text_x.append(mx); edge_text_y.append(my)
-        edge_labels.append(f"{lat if lat is not None else '?'} ms")
-
-    # Plotly wants a single color, so we split edges per-color batch
-    # For simplicity, draw lines with a single neutral color and show latency via labels and node color.
-    edge_trace = go.Scatter(
-        x=edge_x, y=edge_y, mode="lines",
-        line=dict(width=2, color="#7a7f8c"),
-        hoverinfo="none", name="links"
-    )
-
-    label_trace = go.Scatter(
-        x=edge_text_x, y=edge_text_y, mode="text",
-        text=edge_labels, textposition="middle center",
-        textfont=dict(size=12), hoverinfo="none", name="latency"
-    )
-
-    # Node trace
-    node_x, node_y, node_text, node_colors = [], [], [], []
+    # Build node traces (size by degree, color by status)
+    node_x, node_y, node_text, node_sizes, node_colors, node_labels = [], [], [], [], [], []
+    degrees = dict(g.degree())  # undirected degree for prominence
     for n, data in g.nodes(data=True):
-        node_x.append(pos[n][0]); node_y.append(pos[n][1])
+        x, y = pos[n]
+        node_x.append(x); node_y.append(y)
+        status = data.get("status", "healthy")
         label = data.get("label", n)
         role = data.get("role", "node")
-        status = data.get("status", "healthy")
+        node_labels.append(label)
         node_text.append(f"{label}<br>role={role} · status={status}")
         node_colors.append(_node_color(status))
+        node_sizes.append(_node_size_for_degree(degrees.get(n, 1)))
 
     node_trace = go.Scatter(
-        x=node_x, y=node_y, mode="markers+text",
-        text=[n for n in g.nodes()],
+        x=node_x, y=node_y,
+        mode="markers+text",
+        text=node_labels,
         textposition="bottom center",
         hovertext=node_text, hoverinfo="text",
-        marker=dict(size=18, color=node_colors, line=dict(width=1, color="#1f2937")),
+        marker=dict(size=node_sizes, color=node_colors, line=dict(width=1, color="#1f2937")),
         name="nodes"
     )
 
-    fig = go.Figure(data=[edge_trace, label_trace, node_trace])
+    # Build edges as a single gray base layer (for consistent thickness),
+    # then add arrow annotations colored by latency bucket and text labels.
+    edge_lines_x, edge_lines_y = [], []
+    for u, v in g.edges():
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        edge_lines_x += [x0, x1, None]
+        edge_lines_y += [y0, y1, None]
+
+    base_edge_trace = go.Scatter(
+        x=edge_lines_x, y=edge_lines_y,
+        mode="lines",
+        line=dict(width=1.5, color="#6b7280"),
+        hoverinfo="none",
+        name="links-base",
+    )
+
+    # Arrow annotations + latency labels
+    annotations = []
+    for u, v, data in g.edges(data=True):
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        # arrow head point along the edge
+        ax = x0 + (x1 - x0) * ARROW_STEM
+        ay = y0 + (y1 - y0) * ARROW_STEM
+
+        lat_ms = data.get("latency_ms") or data.get("kpi_latency_ms")
+        bucket = _bucket_latency(lat_ms)
+        color = _latency_color(bucket)
+        width = EDGE_WIDTHS["good"] if bucket == "good" else EDGE_WIDTHS["warn"] if bucket == "warn" else EDGE_WIDTHS["bad"]
+
+        # latency label at the midpoint
+        mx = (x0 + x1) / 2.0; my = (y0 + y1) / 2.0
+        annotations.append(dict(x=mx, y=my, xref="x", yref="y",
+                                text=f"{lat_ms if lat_ms is not None else '?'} ms",
+                                showarrow=False, font=dict(size=12, color="#cbd5e1")))
+
+        # arrow (colored by bucket)
+        annotations.append(dict(
+            x=ax, y=ay, ax=x0, ay=y0, xref="x", yref="y", axref="x", ayref="y",
+            arrowhead=3, arrowsize=ARROW_HEAD/10, arrowwidth=width, opacity=ARROW_OPACITY,
+            arrowcolor=color, standoff=2, startstandoff=2,
+            showarrow=True
+        ))
+
+    fig = go.Figure(data=[base_edge_trace, node_trace])
     fig.update_layout(
         margin=dict(l=10, r=10, t=10, b=10),
         showlegend=False,
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
+        annotations=annotations,
     )
     return fig
 
-
-# --------------------------- public API ---------------------------
+# --------------------------- public API --------------------------
 
 def render_battlemap_if_available():
     """Streamlit-friendly wrapper that reads YAML and renders the battlemap."""
@@ -182,6 +200,9 @@ def render_battlemap_if_available():
         return
     if yaml is None:
         st.warning("PyYAML not installed; cannot parse topology file.")
+        return
+    if nx is None:
+        st.warning("networkx not installed; cannot render battlemap.")
         return
     try:
         topology = yaml.safe_load(DEMO_TOPO.read_text()) or {}
