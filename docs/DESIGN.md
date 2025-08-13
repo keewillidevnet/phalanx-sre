@@ -1,4 +1,4 @@
-# Phalanx SRE – System Design & Architecture
+# 🛡️ Phalanx SRE – System Design & Architecture
 
 ## Mission
 Phalanx SRE unifies telemetry, service topology, and multi-hop packet forensics into a single operational intelligence layer.
