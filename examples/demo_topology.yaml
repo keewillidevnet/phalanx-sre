@@ -1,30 +1,54 @@
 ---
 
+# examples/demo_topology.yaml
+# Phalanx SRE demo topology (social-media ready)
+# - Nodes include labels, roles, and status (one degraded)
+# - Edges include latency_ms so the battlemap colors & labels links
+
 nodes:
-  - id: NodeA
-    label: "Node A — Web Frontend"
+  - id: ClientA
+    label: "Client A — Web"
     role: frontend
     status: healthy
-  - id: NodeB
-    label: "Node B — API Gateway"
-    role: api
+  - id: EdgeGW1
+    label: "Edge GW1"
+    role: edge
     status: healthy
-  - id: NodeC
-    label: "Node C — Database"
+  - id: CoreGW2
+    label: "Core GW2"
+    role: core
+    status: healthy
+  - id: ServiceAPI
+    label: "Service API"
+    role: service
+    status: healthy
+  - id: Database
+    label: "Database"
     role: database
-    status: degraded
-  - id: NodeD
-    label: "Node D — External Service"
+    status: degraded   # shows amber node
+  - id: PayGateway
+    label: "Payments Gateway"
     role: external
     status: healthy
 
 edges:
-  - source: NodeA
-    target: NodeB
-    latency_ms: 12
-  - source: NodeB
-    target: NodeC
-    latency_ms: 25
-  - source: NodeB
-    target: NodeD
-    latency_ms: 40
+  # Primary request path (mostly healthy)
+  - source: ClientA
+    target: EdgeGW1
+    latency_ms: 8
+  - source: EdgeGW1
+    target: CoreGW2
+    latency_ms: 22
+  - source: CoreGW2
+    target: ServiceAPI
+    latency_ms: 48
+
+  # DB path (elevated but not critical)
+  - source: ServiceAPI
+    target: Database
+    latency_ms: 95
+
+  # External call (intentionally high to show a red link)
+  - source: ServiceAPI
+    target: PayGateway
+    latency_ms: 130
